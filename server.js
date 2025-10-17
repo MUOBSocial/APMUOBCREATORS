@@ -4,6 +4,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 const axios = require('axios');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
@@ -61,6 +62,9 @@ app.use((req, res, next) => {
 const TALLY_API_KEY = process.env.TALLY_API_KEY || 'tly-H4VtyzbbaNnLkFOVWHuMgmugPpm1W8DW';
 const TALLY_API_BASE = 'https://api.tally.so';
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this';
+
+console.log('[Config] Tally API Key:', TALLY_API_KEY ? `${TALLY_API_KEY.substring(0, 10)}...` : 'NOT SET');
+console.log('[Config] Tally API Base:', TALLY_API_BASE);
 
 // Create tables
 async function initializeDatabase() {
@@ -133,18 +137,43 @@ initializeDatabase();
 // Helper function to make Tally API requests
 async function tallyAPI(endpoint, method = 'GET', data = null) {
     try {
-        const response = await axios({
+        console.log(`[Tally API] ${method} ${TALLY_API_BASE}${endpoint}`);
+        console.log(`[Tally API] Using API Key: ${TALLY_API_KEY ? 'Yes' : 'No'}`);
+        
+        const config = {
             method,
             url: `${TALLY_API_BASE}${endpoint}`,
             headers: {
                 'Authorization': `Bearer ${TALLY_API_KEY}`,
-                'Content-Type': 'application/json'
-            },
-            data
-        });
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            }
+        };
+
+        if (data) {
+            config.data = data;
+        }
+
+        console.log('[Tally API] Request headers:', config.headers);
+        
+        const response = await axios(config);
+        
+        console.log(`[Tally API] Success: ${response.status}`);
+        console.log(`[Tally API] Response data keys:`, response.data ? Object.keys(response.data) : 'No data');
+        
         return response.data;
     } catch (error) {
-        console.error('Tally API Error:', error.response?.data || error.message);
+        console.error('[Tally API Error] Endpoint:', endpoint);
+        console.error('[Tally API Error] Status:', error.response?.status);
+        console.error('[Tally API Error] Status Text:', error.response?.statusText);
+        console.error('[Tally API Error] Response Data:', error.response?.data);
+        console.error('[Tally API Error] Response Headers:', error.response?.headers);
+        console.error('[Tally API Error] Full Error:', error.message);
+        
+        if (error.code) {
+            console.error('[Tally API Error] Error Code:', error.code);
+        }
+        
         throw error;
     }
 }
@@ -189,6 +218,26 @@ app.post('/api/test-cors', (req, res) => {
     });
 });
 
+// Test Tally API directly
+app.get('/api/test-tally', authenticateAdmin, async (req, res) => {
+    try {
+        console.log('[Test Tally] Starting test...');
+        const result = await tallyAPI('/forms');
+        res.json({
+            success: true,
+            formCount: result.data ? result.data.length : 0,
+            forms: result.data ? result.data.slice(0, 2) : [] // Return first 2 forms as sample
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            details: error.response?.data,
+            status: error.response?.status
+        });
+    }
+});
+
 // ==================== ADMIN ENDPOINTS ====================
 
 // Admin login
@@ -231,25 +280,76 @@ app.post('/api/admin/login', async (req, res) => {
     }
 });
 
-// Get all Tally forms
+// Get all Tally forms - WITH ENHANCED ERROR LOGGING
 app.get('/api/admin/tally/forms', authenticateAdmin, async (req, res) => {
     try {
-        const forms = await tallyAPI('/forms');
+        console.log('[Tally Forms] =================================');
+        console.log('[Tally Forms] Starting request...');
+        console.log('[Tally Forms] API Key present:', !!TALLY_API_KEY);
+        console.log('[Tally Forms] API Key value:', TALLY_API_KEY ? `${TALLY_API_KEY.substring(0, 15)}...` : 'NOT SET');
+        
+        // First, test if we can reach Tally API
+        console.log('[Tally Forms] Attempting to fetch forms from Tally...');
+        
+        let forms;
+        try {
+            forms = await tallyAPI('/forms');
+            console.log('[Tally Forms] Successfully retrieved forms from Tally');
+            console.log('[Tally Forms] Response structure:', forms ? Object.keys(forms) : 'null');
+            console.log('[Tally Forms] Forms data exists:', !!forms?.data);
+            console.log('[Tally Forms] Number of forms:', forms?.data ? forms.data.length : 0);
+        } catch (tallyError) {
+            console.error('[Tally Forms] Failed to fetch from Tally API');
+            throw tallyError;
+        }
         
         // Get existing form IDs that are already connected to briefs
-        const result = await pool.query('SELECT tally_form_id FROM briefs');
-        const connectedFormIds = result.rows.map(b => b.tally_form_id);
+        console.log('[Tally Forms] Querying database for existing briefs...');
+        let connectedFormIds = [];
+        try {
+            const result = await pool.query('SELECT tally_form_id FROM briefs');
+            connectedFormIds = result.rows.map(b => b.tally_form_id);
+            console.log('[Tally Forms] Connected form IDs from DB:', connectedFormIds);
+        } catch (dbError) {
+            console.error('[Tally Forms] Database query error:', dbError);
+            // Continue even if DB query fails
+        }
         
         // Add connection status to each form
-        const formsWithStatus = forms.data.map(form => ({
+        const formsWithStatus = forms.data ? forms.data.map(form => ({
             ...form,
             isConnected: connectedFormIds.includes(form.id)
-        }));
+        })) : [];
         
+        console.log('[Tally Forms] Sending response with', formsWithStatus.length, 'forms');
         res.json({ forms: formsWithStatus });
+        
     } catch (error) {
-        console.error('Error fetching forms:', error);
-        res.status(500).json({ error: 'Failed to fetch Tally forms' });
+        console.error('[Tally Forms] =================================');
+        console.error('[Tally Forms Error] COMPLETE ERROR DETAILS:');
+        console.error('[Tally Forms Error] Message:', error.message);
+        console.error('[Tally Forms Error] Name:', error.name);
+        console.error('[Tally Forms Error] Stack:', error.stack);
+        
+        if (error.response) {
+            console.error('[Tally Forms Error] Response Status:', error.response.status);
+            console.error('[Tally Forms Error] Response Headers:', error.response.headers);
+            console.error('[Tally Forms Error] Response Data:', JSON.stringify(error.response.data, null, 2));
+        }
+        
+        if (error.config) {
+            console.error('[Tally Forms Error] Request URL:', error.config.url);
+            console.error('[Tally Forms Error] Request Headers:', error.config.headers);
+        }
+        
+        res.status(500).json({ 
+            error: 'Failed to fetch Tally forms',
+            details: {
+                message: error.message,
+                status: error.response?.status,
+                data: error.response?.data
+            }
+        });
     }
 });
 
@@ -335,7 +435,7 @@ app.post('/api/admin/briefs', authenticateAdmin, async (req, res) => {
 app.get('/api/admin/briefs', authenticateAdmin, async (req, res) => {
     try {
         const result = await pool.query(
-            `SELECT b.*, COUNT(a.id) as application_count 
+            `SELECT b.*, COUNT(a.id)::int as application_count 
              FROM briefs b 
              LEFT JOIN applications a ON b.id = a.brief_id 
              GROUP BY b.id 
@@ -377,19 +477,19 @@ app.get('/api/admin/applications', authenticateAdmin, async (req, res) => {
     const params = [];
     let paramCount = 0;
 
-    if (briefId) {
+    if (briefId && briefId !== 'all') {
         paramCount++;
         query += ` AND a.brief_id = $${paramCount}`;
         params.push(briefId);
     }
     
-    if (status) {
+    if (status && status !== 'all') {
         paramCount++;
         query += ` AND a.status = $${paramCount}`;
         params.push(status);
     }
     
-    if (tier) {
+    if (tier && tier !== 'all') {
         paramCount++;
         query += ` AND b.tier = $${paramCount}`;
         params.push(tier);
@@ -580,38 +680,25 @@ app.get('/health', (req, res) => {
     res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
-// Serve static files ONLY if no API route matches
-// Add this AFTER all API routes
-if (process.env.NODE_ENV === 'production') {
-    const path = require('path');
-    // Serve static files from 'public' directory or wherever your HTML files are
-    app.use(express.static(path.join(__dirname, 'public')));
-    
-    // Catch all handler - send index.html for any non-API routes
-    app.get('*', (req, res) => {
-        // Only send index.html for non-API routes
-        if (!req.path.startsWith('/api')) {
-            res.sendFile(path.join(__dirname, 'public', 'index.html'));
-        } else {
-            res.status(404).json({ error: 'API endpoint not found' });
-        }
-    });
-} else {
-    // 404 handler for development
-    app.use((req, res) => {
-        console.log(`[404] ${req.method} ${req.path} not found`);
-        res.status(404).json({ error: 'Endpoint not found' });
-    });
-}
+// 404 handler
+app.use((req, res) => {
+    console.log(`[404] ${req.method} ${req.path} not found`);
+    res.status(404).json({ error: 'Endpoint not found' });
+});
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
+    console.log('===========================================');
     console.log(`Server running on port ${PORT}`);
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`Admin login: admin / admin123`);
     console.log(`Database: ${process.env.DATABASE_URL ? 'PostgreSQL connected' : 'No DATABASE_URL found'}`);
-    console.log(`Test endpoint: /api/test`);
-    console.log('CORS: Debug mode - All origins allowed with credentials');
+    console.log(`Tally API Key: ${TALLY_API_KEY ? 'SET' : 'NOT SET'}`);
+    console.log('Test endpoints:');
+    console.log('  - /health');
+    console.log('  - /api/test');
+    console.log('  - /api/test-tally (requires auth)');
+    console.log('===========================================');
 });
 
 // Graceful shutdown
