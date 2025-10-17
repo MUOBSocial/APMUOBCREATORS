@@ -206,9 +206,10 @@ app.get('/api/test-tally-submissions/:formId', authenticateAdmin, async (req, re
         const result = await tallyAPI(`/forms/${formId}/submissions`);
         console.log('[Test Submissions] Response keys:', result ? Object.keys(result) : 'null');
         
-        // Check both possible structures
-        const submissions = result?.items || result?.data || [];
+        // Tally returns submissions in 'submissions' field
+        const submissions = result?.submissions || result?.items || result?.data || [];
         console.log('[Test Submissions] Found submissions:', submissions.length);
+        console.log('[Test Submissions] Total count:', result?.totalNumberOfSubmissionsPerFilter || 0);
         
         // Show first submission structure if any exist
         const firstSubmission = submissions[0];
@@ -220,6 +221,7 @@ app.get('/api/test-tally-submissions/:formId', authenticateAdmin, async (req, re
         res.json({
             success: true,
             submissionCount: submissions.length,
+            totalCount: result?.totalNumberOfSubmissionsPerFilter || 0,
             responseStructure: result ? Object.keys(result) : null,
             firstSubmission: firstSubmission ? {
                 id: firstSubmission.id,
@@ -432,10 +434,11 @@ app.post('/api/admin/briefs', authenticateAdmin, async (req, res) => {
             const submissions = await tallyAPI(`/forms/${tallyFormId}/submissions`);
             
             console.log('[Import Submissions] Response structure:', submissions ? Object.keys(submissions) : 'null');
+            console.log('[Import Submissions] Total submissions count:', submissions?.totalNumberOfSubmissionsPerFilter || 0);
             
-            // Tally API returns submissions in 'items' not 'data'
-            const submissionsList = submissions?.items || submissions?.data || [];
-            console.log(`[Import Submissions] Found ${submissionsList.length} submissions to import`);
+            // Tally API returns submissions in 'submissions' field
+            const submissionsList = submissions?.submissions || submissions?.items || submissions?.data || [];
+            console.log(`[Import Submissions] Found ${submissionsList.length} submissions in response`);
             
             if (submissionsList.length > 0) {
                 console.log('[Import Submissions] First submission structure:', Object.keys(submissionsList[0]));
@@ -488,6 +491,9 @@ app.post('/api/admin/briefs', authenticateAdmin, async (req, res) => {
                 }
                 
                 console.log(`[Import Submissions] Successfully imported ${importCount} submissions`);
+            } else {
+                console.log('[Import Submissions] No submissions found in the response');
+                console.log('[Import Submissions] Full response:', JSON.stringify(submissions, null, 2).substring(0, 500));
             }
 
             await client.query('COMMIT');
