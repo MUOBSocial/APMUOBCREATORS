@@ -197,6 +197,52 @@ function authenticateAdmin(req, res, next) {
 
 // ==================== TEST ENDPOINTS ====================
 
+// Test Tally submissions for a specific form
+app.get('/api/test-tally-submissions/:formId', authenticateAdmin, async (req, res) => {
+    try {
+        const { formId } = req.params;
+        console.log('[Test Submissions] Fetching submissions for form:', formId);
+        
+        const result = await tallyAPI(`/forms/${formId}/submissions`);
+        console.log('[Test Submissions] Response keys:', result ? Object.keys(result) : 'null');
+        
+        // Check both possible structures
+        const submissions = result?.items || result?.data || [];
+        console.log('[Test Submissions] Found submissions:', submissions.length);
+        
+        // Show first submission structure if any exist
+        const firstSubmission = submissions[0];
+        if (firstSubmission) {
+            console.log('[Test Submissions] First submission keys:', Object.keys(firstSubmission));
+            console.log('[Test Submissions] Fields structure:', firstSubmission.fields ? Object.keys(firstSubmission.fields) : 'No fields');
+        }
+        
+        res.json({
+            success: true,
+            submissionCount: submissions.length,
+            responseStructure: result ? Object.keys(result) : null,
+            firstSubmission: firstSubmission ? {
+                id: firstSubmission.id,
+                createdAt: firstSubmission.createdAt,
+                fieldKeys: firstSubmission.fields ? Object.keys(firstSubmission.fields) : [],
+                sampleFields: firstSubmission.fields ? 
+                    Object.entries(firstSubmission.fields).slice(0, 3).reduce((acc, [key, value]) => {
+                        acc[key] = value;
+                        return acc;
+                    }, {}) : {}
+            } : null
+        });
+    } catch (error) {
+        console.error('[Test Submissions Error]', error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            details: error.response?.data,
+            status: error.response?.status
+        });
+    }
+});
+
 // Test endpoint to verify server is running
 app.get('/api/test', (req, res) => {
     res.json({ 
@@ -382,37 +428,66 @@ app.post('/api/admin/briefs', authenticateAdmin, async (req, res) => {
 
         // Fetch and import existing submissions
         try {
+            console.log(`[Import Submissions] Fetching submissions for form ${tallyFormId}`);
             const submissions = await tallyAPI(`/forms/${tallyFormId}/submissions`);
+            
+            console.log('[Import Submissions] Response structure:', submissions ? Object.keys(submissions) : 'null');
             
             // Tally API returns submissions in 'items' not 'data'
             const submissionsList = submissions?.items || submissions?.data || [];
+            console.log(`[Import Submissions] Found ${submissionsList.length} submissions to import`);
             
             if (submissionsList.length > 0) {
+                console.log('[Import Submissions] First submission structure:', Object.keys(submissionsList[0]));
+                console.log('[Import Submissions] First submission fields:', submissionsList[0].fields ? Object.keys(submissionsList[0].fields) : 'No fields');
+                
+                let importCount = 0;
                 for (const submission of submissionsList) {
+                    // Log field structure for debugging
+                    if (importCount === 0) {
+                        console.log('[Import Submissions] Sample submission:', {
+                            id: submission.id,
+                            createdAt: submission.createdAt,
+                            fields: submission.fields ? Object.keys(submission.fields) : 'No fields'
+                        });
+                    }
+                    
                     // Extract common fields - adjust based on your form structure
                     const fields = submission.fields || {};
-                    const email = fields.email || fields.Email || '';
-                    const instagram = fields.instagram || fields.Instagram || fields['Instagram Handle'] || '';
-                    const portfolio = fields.portfolio || fields.Portfolio || fields['Portfolio Links'] || '';
-                    const proposal = fields.proposal || fields['Content Proposal'] || '';
+                    const email = fields.email || fields.Email || fields['Email address'] || fields['Email Address'] || '';
+                    const instagram = fields.instagram || fields.Instagram || fields['Instagram Handle'] || fields['Instagram handle'] || '';
+                    const portfolio = fields.portfolio || fields.Portfolio || fields['Portfolio Links'] || fields['Portfolio links'] || '';
+                    const proposal = fields.proposal || fields['Content Proposal'] || fields['Content proposal'] || '';
                     
-                    await client.query(
-                        `INSERT INTO applications 
-                         (brief_id, tally_submission_id, email, instagram, portfolio, content_proposal, submitted_at, raw_tally_data) 
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                         ON CONFLICT (tally_submission_id) DO NOTHING`,
-                        [
-                            briefId,
-                            submission.id,
-                            email,
-                            instagram,
-                            portfolio,
-                            proposal,
-                            submission.createdAt,
-                            JSON.stringify(submission)
-                        ]
-                    );
+                    if (!email) {
+                        console.log('[Import Submissions] Warning: No email found for submission', submission.id);
+                        console.log('[Import Submissions] Available fields:', Object.keys(fields));
+                    }
+                    
+                    try {
+                        await client.query(
+                            `INSERT INTO applications 
+                             (brief_id, tally_submission_id, email, instagram, portfolio, content_proposal, submitted_at, raw_tally_data) 
+                             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                             ON CONFLICT (tally_submission_id) DO NOTHING`,
+                            [
+                                briefId,
+                                submission.id,
+                                email,
+                                instagram,
+                                portfolio,
+                                proposal,
+                                submission.createdAt,
+                                JSON.stringify(submission)
+                            ]
+                        );
+                        importCount++;
+                    } catch (insertError) {
+                        console.error('[Import Submissions] Failed to insert submission:', submission.id, insertError.message);
+                    }
                 }
+                
+                console.log(`[Import Submissions] Successfully imported ${importCount} submissions`);
             }
 
             await client.query('COMMIT');
