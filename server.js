@@ -223,10 +223,14 @@ app.get('/api/test-tally', authenticateAdmin, async (req, res) => {
     try {
         console.log('[Test Tally] Starting test...');
         const result = await tallyAPI('/forms');
+        
+        // Tally API returns forms in 'items' not 'data'
+        const forms = result?.items || result?.data || [];
+        
         res.json({
             success: true,
-            formCount: result.data ? result.data.length : 0,
-            forms: result.data ? result.data.slice(0, 2) : [] // Return first 2 forms as sample
+            formCount: forms.length,
+            forms: forms.slice(0, 2) // Return first 2 forms as sample
         });
     } catch (error) {
         res.status(500).json({
@@ -296,8 +300,11 @@ app.get('/api/admin/tally/forms', authenticateAdmin, async (req, res) => {
             forms = await tallyAPI('/forms');
             console.log('[Tally Forms] Successfully retrieved forms from Tally');
             console.log('[Tally Forms] Response structure:', forms ? Object.keys(forms) : 'null');
-            console.log('[Tally Forms] Forms data exists:', !!forms?.data);
-            console.log('[Tally Forms] Number of forms:', forms?.data ? forms.data.length : 0);
+            
+            // Tally API returns forms in 'items' not 'data'
+            const formsList = forms?.items || forms?.data || [];
+            console.log('[Tally Forms] Forms array exists:', !!formsList);
+            console.log('[Tally Forms] Number of forms:', formsList.length);
         } catch (tallyError) {
             console.error('[Tally Forms] Failed to fetch from Tally API');
             throw tallyError;
@@ -316,10 +323,12 @@ app.get('/api/admin/tally/forms', authenticateAdmin, async (req, res) => {
         }
         
         // Add connection status to each form
-        const formsWithStatus = forms.data ? forms.data.map(form => ({
+        // Tally API returns forms in 'items' not 'data'
+        const formsList = forms?.items || forms?.data || [];
+        const formsWithStatus = formsList.map(form => ({
             ...form,
             isConnected: connectedFormIds.includes(form.id)
-        })) : [];
+        }));
         
         console.log('[Tally Forms] Sending response with', formsWithStatus.length, 'forms');
         res.json({ forms: formsWithStatus });
@@ -375,8 +384,11 @@ app.post('/api/admin/briefs', authenticateAdmin, async (req, res) => {
         try {
             const submissions = await tallyAPI(`/forms/${tallyFormId}/submissions`);
             
-            if (submissions.data && submissions.data.length > 0) {
-                for (const submission of submissions.data) {
+            // Tally API returns submissions in 'items' not 'data'
+            const submissionsList = submissions?.items || submissions?.data || [];
+            
+            if (submissionsList.length > 0) {
+                for (const submission of submissionsList) {
                     // Extract common fields - adjust based on your form structure
                     const fields = submission.fields || {};
                     const email = fields.email || fields.Email || '';
@@ -407,7 +419,7 @@ app.post('/api/admin/briefs', authenticateAdmin, async (req, res) => {
             res.json({ 
                 success: true, 
                 briefId,
-                importedCount: submissions.data ? submissions.data.length : 0 
+                importedCount: submissionsList.length 
             });
         } catch (importError) {
             console.error('Import error:', importError);
