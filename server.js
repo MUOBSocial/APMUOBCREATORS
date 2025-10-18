@@ -48,7 +48,7 @@ app.use(express.urlencoded({ extended: true }));
 // Tally API Configuration
 const TALLY_API_KEY = process.env.TALLY_API_KEY || 'tly-H4VtyzbbaNnLkFOVWHuMgmugPpm1W8DW';
 const TALLY_API_BASE = 'https://api.tally.so';
-const JWT_SECRET = process.env.JWT_SECRET || 'hudson13';
+const JWT_SECRET = process.env.JWT_SECRET || 'alex123';
 
 // Create tables
 async function initializeDatabase() {
