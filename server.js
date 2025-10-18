@@ -4,6 +4,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 const axios = require('axios');
+const csv = require('csv-parser');
 const path = require('path');
 require('dotenv').config();
 
@@ -26,20 +27,15 @@ pool.connect((err, client, done) => {
     }
 });
 
-// SIMPLIFIED CORS - Debug version
+// SIMPLIFIED CORS
 app.use((req, res, next) => {
-    console.log(`[CORS Debug] ${req.method} ${req.path} from origin: ${req.headers.origin}`);
-    
-    // Set CORS headers for all requests
     res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
     res.header('Access-Control-Allow-Credentials', 'true');
     res.header('Access-Control-Max-Age', '86400');
     
-    // Handle preflight
     if (req.method === 'OPTIONS') {
-        console.log('[CORS Debug] Handling OPTIONS preflight request');
         return res.sendStatus(200);
     }
     
@@ -49,22 +45,10 @@ app.use((req, res, next) => {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Request logging middleware
-app.use((req, res, next) => {
-    console.log(`[Request] ${new Date().toISOString()} - ${req.method} ${req.path}`);
-    if (req.method === 'POST' || req.method === 'PUT') {
-        console.log('[Request Body]', req.body);
-    }
-    next();
-});
-
 // Tally API Configuration
 const TALLY_API_KEY = process.env.TALLY_API_KEY || 'tly-H4VtyzbbaNnLkFOVWHuMgmugPpm1W8DW';
 const TALLY_API_BASE = 'https://api.tally.so';
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this';
-
-console.log('[Config] Tally API Key:', TALLY_API_KEY ? `${TALLY_API_KEY.substring(0, 10)}...` : 'NOT SET');
-console.log('[Config] Tally API Base:', TALLY_API_BASE);
 
 // Create tables
 async function initializeDatabase() {
@@ -79,7 +63,7 @@ async function initializeDatabase() {
             )
         `);
 
-        // Create briefs table
+        // Create briefs table - Updated with google_sheet_url
         await pool.query(`
             CREATE TABLE IF NOT EXISTS briefs (
                 id SERIAL PRIMARY KEY,
@@ -91,8 +75,15 @@ async function initializeDatabase() {
                 requirements TEXT,
                 dates VARCHAR(255),
                 status VARCHAR(50) DEFAULT 'live',
+                google_sheet_url VARCHAR(500),
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
+        `);
+
+        // Add google_sheet_url column if it doesn't exist
+        await pool.query(`
+            ALTER TABLE briefs 
+            ADD COLUMN IF NOT EXISTS google_sheet_url VARCHAR(500)
         `);
 
         // Create applications table
@@ -137,9 +128,6 @@ initializeDatabase();
 // Helper function to make Tally API requests
 async function tallyAPI(endpoint, method = 'GET', data = null) {
     try {
-        console.log(`[Tally API] ${method} ${TALLY_API_BASE}${endpoint}`);
-        console.log(`[Tally API] Using API Key: ${TALLY_API_KEY ? 'Yes' : 'No'}`);
-        
         const config = {
             method,
             url: `${TALLY_API_BASE}${endpoint}`,
@@ -153,27 +141,54 @@ async function tallyAPI(endpoint, method = 'GET', data = null) {
         if (data) {
             config.data = data;
         }
-
-        console.log('[Tally API] Request headers:', config.headers);
         
         const response = await axios(config);
-        
-        console.log(`[Tally API] Success: ${response.status}`);
-        console.log(`[Tally API] Response data keys:`, response.data ? Object.keys(response.data) : 'No data');
-        
         return response.data;
     } catch (error) {
-        console.error('[Tally API Error] Endpoint:', endpoint);
-        console.error('[Tally API Error] Status:', error.response?.status);
-        console.error('[Tally API Error] Status Text:', error.response?.statusText);
-        console.error('[Tally API Error] Response Data:', error.response?.data);
-        console.error('[Tally API Error] Response Headers:', error.response?.headers);
-        console.error('[Tally API Error] Full Error:', error.message);
+        console.error('Tally API Error:', error.response?.data || error.message);
+        throw error;
+    }
+}
+
+// Helper function to parse Google Sheets CSV
+async function parseGoogleSheetCSV(sheetUrl) {
+    try {
+        // Convert Google Sheets URL to CSV export URL
+        let csvUrl = sheetUrl;
         
-        if (error.code) {
-            console.error('[Tally API Error] Error Code:', error.code);
+        // If it's a regular Google Sheets URL, convert it to CSV export
+        if (sheetUrl.includes('docs.google.com/spreadsheets')) {
+            const sheetIdMatch = sheetUrl.match(/\/d\/([a-zA-Z0-9-_]+)/);
+            if (sheetIdMatch) {
+                const sheetId = sheetIdMatch[1];
+                csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv`;
+            }
         }
         
+        console.log('[Google Sheets] Fetching CSV from:', csvUrl);
+        
+        const response = await axios.get(csvUrl, {
+            responseType: 'stream',
+            timeout: 30000
+        });
+        
+        const results = [];
+        
+        return new Promise((resolve, reject) => {
+            response.data
+                .pipe(csv())
+                .on('data', (data) => results.push(data))
+                .on('end', () => {
+                    console.log(`[Google Sheets] Parsed ${results.length} rows`);
+                    resolve(results);
+                })
+                .on('error', (error) => {
+                    console.error('[Google Sheets] Parse error:', error);
+                    reject(error);
+                });
+        });
+    } catch (error) {
+        console.error('[Google Sheets] Error fetching CSV:', error);
         throw error;
     }
 }
@@ -197,111 +212,21 @@ function authenticateAdmin(req, res, next) {
 
 // ==================== TEST ENDPOINTS ====================
 
-// Test Tally submissions for a specific form
-app.get('/api/test-tally-submissions/:formId', authenticateAdmin, async (req, res) => {
-    try {
-        const { formId } = req.params;
-        console.log('[Test Submissions] Fetching submissions for form:', formId);
-        
-        const result = await tallyAPI(`/forms/${formId}/submissions`);
-        console.log('[Test Submissions] Response keys:', result ? Object.keys(result) : 'null');
-        
-        // Tally returns submissions in 'submissions' field
-        const submissions = result?.submissions || result?.items || result?.data || [];
-        console.log('[Test Submissions] Found submissions:', submissions.length);
-        console.log('[Test Submissions] Total count:', result?.totalNumberOfSubmissionsPerFilter || 0);
-        
-        // Show first submission structure if any exist
-        const firstSubmission = submissions[0];
-        if (firstSubmission) {
-            console.log('[Test Submissions] First submission keys:', Object.keys(firstSubmission));
-            console.log('[Test Submissions] Fields structure:', firstSubmission.fields ? Object.keys(firstSubmission.fields) : 'No fields');
-        }
-        
-        res.json({
-            success: true,
-            submissionCount: submissions.length,
-            totalCount: result?.totalNumberOfSubmissionsPerFilter || 0,
-            responseStructure: result ? Object.keys(result) : null,
-            firstSubmission: firstSubmission ? {
-                id: firstSubmission.id,
-                createdAt: firstSubmission.createdAt,
-                fieldKeys: firstSubmission.fields ? Object.keys(firstSubmission.fields) : [],
-                sampleFields: firstSubmission.fields ? 
-                    Object.entries(firstSubmission.fields).slice(0, 3).reduce((acc, [key, value]) => {
-                        acc[key] = value;
-                        return acc;
-                    }, {}) : {}
-            } : null
-        });
-    } catch (error) {
-        console.error('[Test Submissions Error]', error);
-        res.status(500).json({
-            success: false,
-            error: error.message,
-            details: error.response?.data,
-            status: error.response?.status
-        });
-    }
-});
-
-// Test endpoint to verify server is running
+// Test endpoint
 app.get('/api/test', (req, res) => {
     res.json({ 
-        message: 'Server is running with PostgreSQL',
-        cors: 'Debug CORS config active',
-        origin: req.headers.origin || 'No origin header',
-        timestamp: new Date().toISOString(),
-        nodeEnv: process.env.NODE_ENV || 'not set',
-        headers: req.headers
+        message: 'Server is running',
+        timestamp: new Date().toISOString()
     });
-});
-
-// Test CORS endpoint
-app.post('/api/test-cors', (req, res) => {
-    res.json({ 
-        message: 'POST request successful',
-        receivedBody: req.body,
-        origin: req.headers.origin
-    });
-});
-
-// Test Tally API directly
-app.get('/api/test-tally', authenticateAdmin, async (req, res) => {
-    try {
-        console.log('[Test Tally] Starting test...');
-        const result = await tallyAPI('/forms');
-        
-        // Tally API returns forms in 'items' not 'data'
-        const forms = result?.items || result?.data || [];
-        
-        res.json({
-            success: true,
-            formCount: forms.length,
-            forms: forms.slice(0, 2) // Return first 2 forms as sample
-        });
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            error: error.message,
-            details: error.response?.data,
-            status: error.response?.status
-        });
-    }
 });
 
 // ==================== ADMIN ENDPOINTS ====================
 
 // Admin login
 app.post('/api/admin/login', async (req, res) => {
-    console.log('[Login Attempt] Headers:', req.headers);
-    console.log('[Login Attempt] Body:', req.body);
-    
     const { username, password } = req.body;
 
-    // Validate input
     if (!username || !password) {
-        console.log('[Login Error] Missing username or password');
         return res.status(400).json({ error: 'Username and password are required' });
     }
 
@@ -309,22 +234,17 @@ app.post('/api/admin/login', async (req, res) => {
         const result = await pool.query('SELECT * FROM admins WHERE username = $1', [username]);
         const admin = result.rows[0];
 
-        console.log('[Login] Admin found:', admin ? 'Yes' : 'No');
-
         if (!admin) {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
         const validPassword = await bcrypt.compare(password, admin.password_hash);
-        console.log('[Login] Password valid:', validPassword);
         
         if (!validPassword) {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
         const token = jwt.sign({ adminId: admin.id }, JWT_SECRET, { expiresIn: '24h' });
-        console.log('[Login Success] Token generated for admin:', admin.username);
-        
         res.json({ token, username: admin.username });
     } catch (err) {
         console.error('[Login Error]', err);
@@ -332,87 +252,33 @@ app.post('/api/admin/login', async (req, res) => {
     }
 });
 
-// Get all Tally forms - WITH ENHANCED ERROR LOGGING
+// Get all Tally forms
 app.get('/api/admin/tally/forms', authenticateAdmin, async (req, res) => {
     try {
-        console.log('[Tally Forms] =================================');
-        console.log('[Tally Forms] Starting request...');
-        console.log('[Tally Forms] API Key present:', !!TALLY_API_KEY);
-        console.log('[Tally Forms] API Key value:', TALLY_API_KEY ? `${TALLY_API_KEY.substring(0, 15)}...` : 'NOT SET');
-        
-        // First, test if we can reach Tally API
-        console.log('[Tally Forms] Attempting to fetch forms from Tally...');
-        
-        let forms;
-        try {
-            forms = await tallyAPI('/forms');
-            console.log('[Tally Forms] Successfully retrieved forms from Tally');
-            console.log('[Tally Forms] Response structure:', forms ? Object.keys(forms) : 'null');
-            
-            // Tally API returns forms in 'items' not 'data'
-            const formsList = forms?.items || forms?.data || [];
-            console.log('[Tally Forms] Forms array exists:', !!formsList);
-            console.log('[Tally Forms] Number of forms:', formsList.length);
-        } catch (tallyError) {
-            console.error('[Tally Forms] Failed to fetch from Tally API');
-            throw tallyError;
-        }
+        const forms = await tallyAPI('/forms');
         
         // Get existing form IDs that are already connected to briefs
-        console.log('[Tally Forms] Querying database for existing briefs...');
-        let connectedFormIds = [];
-        try {
-            const result = await pool.query('SELECT tally_form_id FROM briefs');
-            connectedFormIds = result.rows.map(b => b.tally_form_id);
-            console.log('[Tally Forms] Connected form IDs from DB:', connectedFormIds);
-        } catch (dbError) {
-            console.error('[Tally Forms] Database query error:', dbError);
-            // Continue even if DB query fails
-        }
+        const result = await pool.query('SELECT tally_form_id FROM briefs');
+        const connectedFormIds = result.rows.map(b => b.tally_form_id);
         
-        // Add connection status to each form
-        // Tally API returns forms in 'items' not 'data'
+        // Tally API returns forms in 'items'
         const formsList = forms?.items || forms?.data || [];
+        
         const formsWithStatus = formsList.map(form => ({
             ...form,
             isConnected: connectedFormIds.includes(form.id)
         }));
         
-        console.log('[Tally Forms] Sending response with', formsWithStatus.length, 'forms');
         res.json({ forms: formsWithStatus });
-        
     } catch (error) {
-        console.error('[Tally Forms] =================================');
-        console.error('[Tally Forms Error] COMPLETE ERROR DETAILS:');
-        console.error('[Tally Forms Error] Message:', error.message);
-        console.error('[Tally Forms Error] Name:', error.name);
-        console.error('[Tally Forms Error] Stack:', error.stack);
-        
-        if (error.response) {
-            console.error('[Tally Forms Error] Response Status:', error.response.status);
-            console.error('[Tally Forms Error] Response Headers:', error.response.headers);
-            console.error('[Tally Forms Error] Response Data:', JSON.stringify(error.response.data, null, 2));
-        }
-        
-        if (error.config) {
-            console.error('[Tally Forms Error] Request URL:', error.config.url);
-            console.error('[Tally Forms Error] Request Headers:', error.config.headers);
-        }
-        
-        res.status(500).json({ 
-            error: 'Failed to fetch Tally forms',
-            details: {
-                message: error.message,
-                status: error.response?.status,
-                data: error.response?.data
-            }
-        });
+        console.error('Error fetching forms:', error);
+        res.status(500).json({ error: 'Failed to fetch Tally forms' });
     }
 });
 
-// Create new brief and import submissions
+// Create new brief with Google Sheet link
 app.post('/api/admin/briefs', authenticateAdmin, async (req, res) => {
-    const { tallyFormId, tallyFormName, title, location, tier, requirements, dates } = req.body;
+    const { tallyFormId, tallyFormName, title, location, tier, requirements, dates, googleSheetUrl } = req.body;
     const client = await pool.connect();
 
     try {
@@ -420,51 +286,33 @@ app.post('/api/admin/briefs', authenticateAdmin, async (req, res) => {
 
         // Create brief
         const briefResult = await client.query(
-            `INSERT INTO briefs (tally_form_id, tally_form_name, title, location, tier, requirements, dates) 
-             VALUES ($1, $2, $3, $4, $5, $6, $7) 
+            `INSERT INTO briefs (tally_form_id, tally_form_name, title, location, tier, requirements, dates, google_sheet_url) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
              RETURNING id`,
-            [tallyFormId, tallyFormName, title, location, tier, requirements, dates]
+            [tallyFormId, tallyFormName, title, location, tier, requirements, dates, googleSheetUrl]
         );
 
         const briefId = briefResult.rows[0].id;
+        let importedCount = 0;
 
-        // Fetch and import existing submissions
-        try {
-            console.log(`[Import Submissions] Fetching submissions for form ${tallyFormId}`);
-            const submissions = await tallyAPI(`/forms/${tallyFormId}/submissions`);
-            
-            console.log('[Import Submissions] Response structure:', submissions ? Object.keys(submissions) : 'null');
-            console.log('[Import Submissions] Total submissions count:', submissions?.totalNumberOfSubmissionsPerFilter || 0);
-            
-            // Tally API returns submissions in 'submissions' field
-            const submissionsList = submissions?.submissions || submissions?.items || submissions?.data || [];
-            console.log(`[Import Submissions] Found ${submissionsList.length} submissions in response`);
-            
-            if (submissionsList.length > 0) {
-                console.log('[Import Submissions] First submission structure:', Object.keys(submissionsList[0]));
-                console.log('[Import Submissions] First submission fields:', submissionsList[0].fields ? Object.keys(submissionsList[0].fields) : 'No fields');
+        // If Google Sheet URL provided, import submissions
+        if (googleSheetUrl) {
+            try {
+                console.log('[Import] Importing from Google Sheet:', googleSheetUrl);
+                const submissions = await parseGoogleSheetCSV(googleSheetUrl);
                 
-                let importCount = 0;
-                for (const submission of submissionsList) {
-                    // Log field structure for debugging
-                    if (importCount === 0) {
-                        console.log('[Import Submissions] Sample submission:', {
-                            id: submission.id,
-                            createdAt: submission.createdAt,
-                            fields: submission.fields ? Object.keys(submission.fields) : 'No fields'
-                        });
-                    }
+                for (let i = 0; i < submissions.length; i++) {
+                    const submission = submissions[i];
                     
-                    // Extract common fields - adjust based on your form structure
-                    const fields = submission.fields || {};
-                    const email = fields.email || fields.Email || fields['Email address'] || fields['Email Address'] || '';
-                    const instagram = fields.instagram || fields.Instagram || fields['Instagram Handle'] || fields['Instagram handle'] || '';
-                    const portfolio = fields.portfolio || fields.Portfolio || fields['Portfolio Links'] || fields['Portfolio links'] || '';
-                    const proposal = fields.proposal || fields['Content Proposal'] || fields['Content proposal'] || '';
+                    // Map common field names (adjust based on your form)
+                    const email = submission.Email || submission.email || submission['Email Address'] || '';
+                    const instagram = submission.Instagram || submission['Instagram Handle'] || submission['Instagram handle'] || '';
+                    const portfolio = submission.Portfolio || submission['Portfolio Link'] || submission['Portfolio Links'] || '';
+                    const proposal = submission['Content Proposal'] || submission['Content proposal'] || submission.Proposal || '';
                     
                     if (!email) {
-                        console.log('[Import Submissions] Warning: No email found for submission', submission.id);
-                        console.log('[Import Submissions] Available fields:', Object.keys(fields));
+                        console.log(`[Import] Skipping row ${i + 1}: no email found`);
+                        continue;
                     }
                     
                     try {
@@ -475,43 +323,34 @@ app.post('/api/admin/briefs', authenticateAdmin, async (req, res) => {
                              ON CONFLICT (tally_submission_id) DO NOTHING`,
                             [
                                 briefId,
-                                submission.id,
+                                `${tallyFormId}_row_${i + 1}`, // Create unique ID from form ID and row number
                                 email,
                                 instagram,
                                 portfolio,
                                 proposal,
-                                submission.createdAt,
+                                submission.Timestamp || new Date(),
                                 JSON.stringify(submission)
                             ]
                         );
-                        importCount++;
+                        importedCount++;
                     } catch (insertError) {
-                        console.error('[Import Submissions] Failed to insert submission:', submission.id, insertError.message);
+                        console.error(`[Import] Failed to insert row ${i + 1}:`, insertError.message);
                     }
                 }
                 
-                console.log(`[Import Submissions] Successfully imported ${importCount} submissions`);
-            } else {
-                console.log('[Import Submissions] No submissions found in the response');
-                console.log('[Import Submissions] Full response:', JSON.stringify(submissions, null, 2).substring(0, 500));
+                console.log(`[Import] Successfully imported ${importedCount} submissions`);
+            } catch (importError) {
+                console.error('[Import] Error importing from Google Sheet:', importError);
+                // Continue even if import fails - brief is still created
             }
-
-            await client.query('COMMIT');
-            res.json({ 
-                success: true, 
-                briefId,
-                importedCount: submissionsList.length 
-            });
-        } catch (importError) {
-            console.error('Import error:', importError);
-            await client.query('COMMIT');
-            res.json({ 
-                success: true, 
-                briefId,
-                importedCount: 0,
-                warning: 'Brief created but failed to import existing submissions' 
-            });
         }
+
+        await client.query('COMMIT');
+        res.json({ 
+            success: true, 
+            briefId,
+            importedCount
+        });
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('Error creating brief:', error);
@@ -521,6 +360,79 @@ app.post('/api/admin/briefs', authenticateAdmin, async (req, res) => {
         res.status(500).json({ error: 'Failed to create brief' });
     } finally {
         client.release();
+    }
+});
+
+// Import submissions from Google Sheet for existing brief
+app.post('/api/admin/brief/:id/import-sheet', authenticateAdmin, async (req, res) => {
+    const { googleSheetUrl } = req.body;
+    const briefId = req.params.id;
+    
+    try {
+        // Update the brief with the new sheet URL
+        await pool.query(
+            'UPDATE briefs SET google_sheet_url = $1 WHERE id = $2',
+            [googleSheetUrl, briefId]
+        );
+        
+        // Get brief info
+        const briefResult = await pool.query('SELECT * FROM briefs WHERE id = $1', [briefId]);
+        const brief = briefResult.rows[0];
+        
+        if (!brief) {
+            return res.status(404).json({ error: 'Brief not found' });
+        }
+        
+        // Import submissions
+        const submissions = await parseGoogleSheetCSV(googleSheetUrl);
+        let importedCount = 0;
+        
+        for (let i = 0; i < submissions.length; i++) {
+            const submission = submissions[i];
+            
+            const email = submission.Email || submission.email || submission['Email Address'] || '';
+            const instagram = submission.Instagram || submission['Instagram Handle'] || '';
+            const portfolio = submission.Portfolio || submission['Portfolio Link'] || '';
+            const proposal = submission['Content Proposal'] || submission.Proposal || '';
+            
+            if (!email) continue;
+            
+            try {
+                await pool.query(
+                    `INSERT INTO applications 
+                     (brief_id, tally_submission_id, email, instagram, portfolio, content_proposal, submitted_at, raw_tally_data) 
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                     ON CONFLICT (tally_submission_id) 
+                     DO UPDATE SET 
+                        email = EXCLUDED.email,
+                        instagram = EXCLUDED.instagram,
+                        portfolio = EXCLUDED.portfolio,
+                        content_proposal = EXCLUDED.content_proposal`,
+                    [
+                        briefId,
+                        `${brief.tally_form_id}_row_${i + 1}`,
+                        email,
+                        instagram,
+                        portfolio,
+                        proposal,
+                        submission.Timestamp || new Date(),
+                        JSON.stringify(submission)
+                    ]
+                );
+                importedCount++;
+            } catch (insertError) {
+                console.error(`Failed to insert row ${i + 1}:`, insertError.message);
+            }
+        }
+        
+        res.json({ 
+            success: true, 
+            importedCount,
+            totalRows: submissions.length 
+        });
+    } catch (error) {
+        console.error('Error importing from sheet:', error);
+        res.status(500).json({ error: 'Failed to import from Google Sheet' });
     }
 });
 
@@ -639,7 +551,7 @@ app.post('/api/admin/applications/bulk-update', authenticateAdmin, async (req, r
 
 // ==================== USER ENDPOINTS ====================
 
-// User login (check email across all applications)
+// User login
 app.post('/api/user/login', async (req, res) => {
     const { email } = req.body;
     
@@ -689,60 +601,6 @@ app.get('/api/user/applications', async (req, res) => {
     }
 });
 
-// ==================== WEBHOOK ENDPOINT ====================
-
-// Tally webhook handler
-app.post('/api/webhook/tally', async (req, res) => {
-    const { eventType, data } = req.body;
-    
-    if (eventType === 'SUBMISSION_CREATED') {
-        const { formId, submissionId } = data;
-        
-        try {
-            // Find the brief connected to this form
-            const briefResult = await pool.query(
-                'SELECT id FROM briefs WHERE tally_form_id = $1',
-                [formId]
-            );
-            
-            if (briefResult.rows.length === 0) {
-                return res.status(200).json({ received: true });
-            }
-            
-            const briefId = briefResult.rows[0].id;
-            
-            // Extract fields from submission
-            const fields = data.fields || {};
-            const email = fields.email || fields.Email || '';
-            const instagram = fields.instagram || fields.Instagram || '';
-            const portfolio = fields.portfolio || fields.Portfolio || '';
-            const proposal = fields.proposal || fields['Content Proposal'] || '';
-            
-            // Insert application
-            await pool.query(
-                `INSERT INTO applications 
-                 (brief_id, tally_submission_id, email, instagram, portfolio, content_proposal, submitted_at, raw_tally_data) 
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                 ON CONFLICT (tally_submission_id) DO NOTHING`,
-                [
-                    briefId,
-                    submissionId,
-                    email,
-                    instagram,
-                    portfolio,
-                    proposal,
-                    data.createdAt || new Date(),
-                    JSON.stringify(data)
-                ]
-            );
-        } catch (err) {
-            console.error('Webhook processing error:', err);
-        }
-    }
-    
-    res.status(200).json({ received: true });
-});
-
 // ==================== STATS ENDPOINT ====================
 
 // Dashboard statistics
@@ -768,30 +626,20 @@ app.get('/api/admin/stats', authenticateAdmin, async (req, res) => {
     }
 });
 
-// Health check endpoint for Railway
+// Health check endpoint
 app.get('/health', (req, res) => {
     res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
 // 404 handler
 app.use((req, res) => {
-    console.log(`[404] ${req.method} ${req.path} not found`);
     res.status(404).json({ error: 'Endpoint not found' });
 });
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
-    console.log('===========================================');
     console.log(`Server running on port ${PORT}`);
-    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`Admin login: admin / admin123`);
-    console.log(`Database: ${process.env.DATABASE_URL ? 'PostgreSQL connected' : 'No DATABASE_URL found'}`);
-    console.log(`Tally API Key: ${TALLY_API_KEY ? 'SET' : 'NOT SET'}`);
-    console.log('Test endpoints:');
-    console.log('  - /health');
-    console.log('  - /api/test');
-    console.log('  - /api/test-tally (requires auth)');
-    console.log('===========================================');
 });
 
 // Graceful shutdown
