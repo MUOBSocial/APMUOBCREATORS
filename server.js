@@ -304,14 +304,26 @@ app.post('/api/admin/briefs', authenticateAdmin, async (req, res) => {
                 for (let i = 0; i < submissions.length; i++) {
                     const submission = submissions[i];
                     
-                    // Map common field names (adjust based on your form)
-                    const email = submission.Email || submission.email || submission['Email Address'] || '';
-                    const instagram = submission.Instagram || submission['Instagram Handle'] || submission['Instagram handle'] || '';
-                    const portfolio = submission.Portfolio || submission['Portfolio Link'] || submission['Portfolio Links'] || '';
-                    const proposal = submission['Content Proposal'] || submission['Content proposal'] || submission.Proposal || '';
+                    // Map fields based on actual Google Form column names
+                    const email = submission['Email Address'] || submission.Email || submission.email || submission['Email address'] || '';
+                    const instagram = submission['Instagram or TikTok URL'] || submission.Instagram || submission['Instagram Handle'] || submission['Instagram handle'] || '';
+                    const portfolio = submission['Link to Your Media Kit or Portfolio'] || submission.Portfolio || submission['Portfolio Link'] || submission['Portfolio Links'] || '';
+                    
+                    // Additional fields from the form
+                    const fullName = submission['Full Name'] || '';
+                    const followerCount = submission['Follower Count'] || '';
+                    const engagementRate = submission['Average Engagement Rate'] || '';
+                    const contentStyle = submission['Main Content Style'] || '';
+                    const location = submission['Home Country or Current Location'] || '';
+                    const availability = submission['When Are You Available to Stay?'] || '';
+                    const travelCompanion = submission['Would You Be Travelling Solo or With Someone?'] || '';
+                    
+                    // Create a content proposal from multiple fields
+                    const proposal = `Name: ${fullName}\nStyle: ${contentStyle}\nFollowers: ${followerCount}\nEngagement: ${engagementRate}\nLocation: ${location}\nAvailability: ${availability}\nTravel: ${travelCompanion}`;
                     
                     if (!email) {
                         console.log(`[Import] Skipping row ${i + 1}: no email found`);
+                        console.log('[Import] Row data:', Object.keys(submission));
                         continue;
                     }
                     
@@ -323,12 +335,12 @@ app.post('/api/admin/briefs', authenticateAdmin, async (req, res) => {
                              ON CONFLICT (tally_submission_id) DO NOTHING`,
                             [
                                 briefId,
-                                `${tallyFormId}_row_${i + 1}`, // Create unique ID from form ID and row number
+                                submission['Submission ID'] || `${tallyFormId}_row_${i + 1}`,
                                 email,
                                 instagram,
                                 portfolio,
                                 proposal,
-                                submission.Timestamp || new Date(),
+                                submission['Submitted at'] || submission.Timestamp || new Date(),
                                 JSON.stringify(submission)
                             ]
                         );
@@ -390,10 +402,22 @@ app.post('/api/admin/brief/:id/import-sheet', authenticateAdmin, async (req, res
         for (let i = 0; i < submissions.length; i++) {
             const submission = submissions[i];
             
-            const email = submission.Email || submission.email || submission['Email Address'] || '';
-            const instagram = submission.Instagram || submission['Instagram Handle'] || '';
-            const portfolio = submission.Portfolio || submission['Portfolio Link'] || '';
-            const proposal = submission['Content Proposal'] || submission.Proposal || '';
+            // Map fields based on actual Google Form column names
+            const email = submission['Email Address'] || submission.Email || submission.email || submission['Email address'] || '';
+            const instagram = submission['Instagram or TikTok URL'] || submission.Instagram || submission['Instagram Handle'] || '';
+            const portfolio = submission['Link to Your Media Kit or Portfolio'] || submission.Portfolio || submission['Portfolio Link'] || '';
+            
+            // Additional fields from the form
+            const fullName = submission['Full Name'] || '';
+            const followerCount = submission['Follower Count'] || '';
+            const engagementRate = submission['Average Engagement Rate'] || '';
+            const contentStyle = submission['Main Content Style'] || '';
+            const location = submission['Home Country or Current Location'] || '';
+            const availability = submission['When Are You Available to Stay?'] || '';
+            const travelCompanion = submission['Would You Be Travelling Solo or With Someone?'] || '';
+            
+            // Create a content proposal from multiple fields
+            const proposal = `Name: ${fullName}\nStyle: ${contentStyle}\nFollowers: ${followerCount}\nEngagement: ${engagementRate}\nLocation: ${location}\nAvailability: ${availability}\nTravel: ${travelCompanion}`;
             
             if (!email) continue;
             
@@ -410,12 +434,12 @@ app.post('/api/admin/brief/:id/import-sheet', authenticateAdmin, async (req, res
                         content_proposal = EXCLUDED.content_proposal`,
                     [
                         briefId,
-                        `${brief.tally_form_id}_row_${i + 1}`,
+                        submission['Submission ID'] || `${brief.tally_form_id}_row_${i + 1}`,
                         email,
                         instagram,
                         portfolio,
                         proposal,
-                        submission.Timestamp || new Date(),
+                        submission['Submitted at'] || submission.Timestamp || new Date(),
                         JSON.stringify(submission)
                     ]
                 );
