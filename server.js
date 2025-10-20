@@ -27,33 +27,52 @@ pool.connect((err, client, done) => {
     }
 });
 
-// SIMPLIFIED CORS - Allow all origins for development
+// ENHANCED CORS - Properly handle Authorization header
 app.use((req, res, next) => {
     const origin = req.headers.origin || '*';
+    
+    // Set CORS headers
     res.header('Access-Control-Allow-Origin', origin);
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
     res.header('Access-Control-Allow-Credentials', 'true');
     res.header('Access-Control-Max-Age', '86400');
+    res.header('Access-Control-Expose-Headers', 'Authorization');
     
+    // Handle preflight requests
     if (req.method === 'OPTIONS') {
+        res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
         return res.sendStatus(200);
     }
     
     next();
 });
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// Request logging middleware
+// Middleware to normalize headers (case-insensitive)
 app.use((req, res, next) => {
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
-    if (req.headers.authorization) {
-        console.log('[Auth] Authorization header present');
-    } else {
-        console.log('[Auth] No authorization header');
+    // Normalize authorization header - some clients send it as 'Authorization' or 'authorization'
+    if (!req.headers.authorization) {
+        // Check for different cases
+        const authKeys = Object.keys(req.headers).filter(key => key.toLowerCase() === 'authorization');
+        if (authKeys.length > 0) {
+            req.headers.authorization = req.headers[authKeys[0]];
+        }
     }
+    next();
+});
+
+// Enhanced request logging middleware
+app.use((req, res, next) => {
+    console.log(`\n[${new Date().toISOString()}] ${req.method} ${req.path}`);
+    console.log('[Headers] Origin:', req.headers.origin || 'none');
+    console.log('[Headers] Content-Type:', req.headers['content-type'] || 'none');
+    console.log('[Headers] Authorization:', req.headers.authorization ? 'Bearer token present' : 'NO AUTH HEADER');
+    
+    // Log all headers for debugging (remove in production)
+    if (req.path.includes('/admin/') && !req.headers.authorization) {
+        console.log('[Debug] All headers:', JSON.stringify(req.headers, null, 2));
+    }
+    
     next();
 });
 
@@ -205,24 +224,38 @@ async function parseGoogleSheetCSV(sheetUrl) {
     }
 }
 
-// Auth Middleware with improved error handling
+// Auth Middleware with enhanced debugging
 function authenticateAdmin(req, res, next) {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.split(' ')[1];
+    // Get authorization header - handle different formats
+    let authHeader = req.headers.authorization || req.headers.Authorization;
+    
+    console.log('[Auth] Request path:', req.path);
+    console.log('[Auth] Auth header received:', authHeader ? 'Yes' : 'No');
     
     if (!authHeader) {
-        console.log('[Auth] Missing authorization header');
+        console.log('[Auth] No authorization header found');
+        console.log('[Auth] All headers:', Object.keys(req.headers));
         return res.status(401).json({ 
             error: 'No authorization header provided',
-            message: 'Please include Authorization: Bearer <token> in headers'
+            message: 'Please include Authorization: Bearer <token> in headers',
+            headers: Object.keys(req.headers) // Debug info
         });
     }
     
-    if (!token) {
-        console.log('[Auth] Invalid authorization format');
+    // Extract token - handle "Bearer " prefix
+    let token;
+    if (authHeader.startsWith('Bearer ')) {
+        token = authHeader.substring(7);
+    } else {
+        token = authHeader;
+    }
+    
+    if (!token || token === 'null' || token === 'undefined') {
+        console.log('[Auth] Invalid or missing token');
         return res.status(401).json({ 
             error: 'Invalid authorization format',
-            message: 'Authorization header should be: Bearer <token>'
+            message: 'Authorization header should be: Bearer <token>',
+            received: authHeader
         });
     }
 
@@ -236,12 +269,20 @@ function authenticateAdmin(req, res, next) {
         if (error.name === 'TokenExpiredError') {
             return res.status(401).json({ 
                 error: 'Token expired',
-                message: 'Please login again'
+                message: 'Please login again',
+                expiredAt: error.expiredAt
+            });
+        }
+        if (error.name === 'JsonWebTokenError') {
+            return res.status(401).json({ 
+                error: 'Invalid token',
+                message: error.message,
+                tokenLength: token ? token.length : 0
             });
         }
         return res.status(401).json({ 
-            error: 'Invalid token',
-            message: 'Token verification failed'
+            error: 'Token verification failed',
+            message: error.message
         });
     }
 }
@@ -253,20 +294,41 @@ app.get('/api/test', (req, res) => {
     res.json({ 
         message: 'Server is running',
         timestamp: new Date().toISOString(),
-        environment: process.env.NODE_ENV || 'development'
+        environment: process.env.NODE_ENV || 'development',
+        corsTest: {
+            origin: req.headers.origin || 'no origin header',
+            authHeader: req.headers.authorization ? 'present' : 'missing'
+        }
     });
 });
 
 // Verify token endpoint - helps debug authentication issues
-app.post('/api/verify-token', (req, res) => {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.split(' ')[1];
+app.get('/api/verify-token', (req, res) => {
+    const authHeader = req.headers.authorization || req.headers.Authorization;
     
-    if (!token) {
+    console.log('[Verify] Headers received:', Object.keys(req.headers));
+    console.log('[Verify] Auth header:', authHeader);
+    
+    if (!authHeader) {
         return res.status(401).json({ 
             valid: false, 
-            error: 'No token provided',
-            authHeader: authHeader || 'none'
+            error: 'No authorization header',
+            headersReceived: Object.keys(req.headers)
+        });
+    }
+
+    let token;
+    if (authHeader.startsWith('Bearer ')) {
+        token = authHeader.substring(7);
+    } else {
+        token = authHeader;
+    }
+    
+    if (!token || token === 'null' || token === 'undefined') {
+        return res.status(401).json({ 
+            valid: false, 
+            error: 'Invalid token format',
+            authHeader: authHeader
         });
     }
 
@@ -275,13 +337,17 @@ app.post('/api/verify-token', (req, res) => {
         res.json({ 
             valid: true, 
             adminId: decoded.adminId,
-            expiresAt: new Date(decoded.exp * 1000).toISOString()
+            issuedAt: new Date(decoded.iat * 1000).toISOString(),
+            expiresAt: new Date(decoded.exp * 1000).toISOString(),
+            tokenLength: token.length
         });
     } catch (error) {
         res.status(401).json({ 
             valid: false, 
             error: error.message,
-            tokenProvided: !!token
+            tokenProvided: !!token,
+            tokenLength: token ? token.length : 0,
+            errorType: error.name
         });
     }
 });
