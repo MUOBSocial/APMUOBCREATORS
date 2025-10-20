@@ -27,9 +27,10 @@ pool.connect((err, client, done) => {
     }
 });
 
-// SIMPLIFIED CORS
+// SIMPLIFIED CORS - Allow all origins for development
 app.use((req, res, next) => {
-    res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+    const origin = req.headers.origin || '*';
+    res.header('Access-Control-Allow-Origin', origin);
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
     res.header('Access-Control-Allow-Credentials', 'true');
@@ -44,6 +45,17 @@ app.use((req, res, next) => {
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Request logging middleware
+app.use((req, res, next) => {
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+    if (req.headers.authorization) {
+        console.log('[Auth] Authorization header present');
+    } else {
+        console.log('[Auth] No authorization header');
+    }
+    next();
+});
 
 // Tally API Configuration
 const TALLY_API_KEY = process.env.TALLY_API_KEY || 'tly-H4VtyzbbaNnLkFOVWHuMgmugPpm1W8DW';
@@ -193,24 +205,86 @@ async function parseGoogleSheetCSV(sheetUrl) {
     }
 }
 
-// Auth Middleware
+// Auth Middleware with improved error handling
 function authenticateAdmin(req, res, next) {
-    const token = req.headers.authorization?.split(' ')[1];
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.split(' ')[1];
+    
+    if (!authHeader) {
+        console.log('[Auth] Missing authorization header');
+        return res.status(401).json({ 
+            error: 'No authorization header provided',
+            message: 'Please include Authorization: Bearer <token> in headers'
+        });
+    }
     
     if (!token) {
-        return res.status(401).json({ error: 'No token provided' });
+        console.log('[Auth] Invalid authorization format');
+        return res.status(401).json({ 
+            error: 'Invalid authorization format',
+            message: 'Authorization header should be: Bearer <token>'
+        });
     }
 
     try {
         const decoded = jwt.verify(token, JWT_SECRET);
         req.adminId = decoded.adminId;
+        console.log('[Auth] Token valid for admin ID:', decoded.adminId);
         next();
     } catch (error) {
-        return res.status(401).json({ error: 'Invalid token' });
+        console.log('[Auth] Token verification failed:', error.message);
+        if (error.name === 'TokenExpiredError') {
+            return res.status(401).json({ 
+                error: 'Token expired',
+                message: 'Please login again'
+            });
+        }
+        return res.status(401).json({ 
+            error: 'Invalid token',
+            message: 'Token verification failed'
+        });
     }
 }
 
 // ==================== TEST ENDPOINTS ====================
+
+// Test endpoint
+app.get('/api/test', (req, res) => {
+    res.json({ 
+        message: 'Server is running',
+        timestamp: new Date().toISOString(),
+        environment: process.env.NODE_ENV || 'development'
+    });
+});
+
+// Verify token endpoint - helps debug authentication issues
+app.post('/api/verify-token', (req, res) => {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.split(' ')[1];
+    
+    if (!token) {
+        return res.status(401).json({ 
+            valid: false, 
+            error: 'No token provided',
+            authHeader: authHeader || 'none'
+        });
+    }
+
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        res.json({ 
+            valid: true, 
+            adminId: decoded.adminId,
+            expiresAt: new Date(decoded.exp * 1000).toISOString()
+        });
+    } catch (error) {
+        res.status(401).json({ 
+            valid: false, 
+            error: error.message,
+            tokenProvided: !!token
+        });
+    }
+});
 
 // Debug endpoint to see raw Tally forms response
 app.get('/api/admin/tally/debug', authenticateAdmin, async (req, res) => {
@@ -229,14 +303,6 @@ app.get('/api/admin/tally/debug', authenticateAdmin, async (req, res) => {
     }
 });
 
-// Test endpoint
-app.get('/api/test', (req, res) => {
-    res.json({ 
-        message: 'Server is running',
-        timestamp: new Date().toISOString()
-    });
-});
-
 // ==================== ADMIN ENDPOINTS ====================
 
 // Admin login
@@ -252,20 +318,27 @@ app.post('/api/admin/login', async (req, res) => {
         const admin = result.rows[0];
 
         if (!admin) {
+            console.log('[Login] User not found:', username);
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
         const validPassword = await bcrypt.compare(password, admin.password_hash);
         
         if (!validPassword) {
+            console.log('[Login] Invalid password for user:', username);
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
         const token = jwt.sign({ adminId: admin.id }, JWT_SECRET, { expiresIn: '24h' });
-        res.json({ token, username: admin.username });
+        console.log('[Login] Successful login for:', username);
+        res.json({ 
+            token, 
+            username: admin.username,
+            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+        });
     } catch (err) {
         console.error('[Login Error]', err);
-        return res.status(500).json({ error: 'Database error' });
+        return res.status(500).json({ error: 'Database error during login' });
     }
 });
 
@@ -305,7 +378,10 @@ app.get('/api/admin/tally/forms', authenticateAdmin, async (req, res) => {
         res.json({ forms: formsWithStatus });
     } catch (error) {
         console.error('Error fetching forms:', error);
-        res.status(500).json({ error: 'Failed to fetch Tally forms' });
+        res.status(500).json({ 
+            error: 'Failed to fetch Tally forms',
+            details: error.message
+        });
     }
 });
 
@@ -402,7 +478,10 @@ app.post('/api/admin/briefs', authenticateAdmin, async (req, res) => {
         if (error.constraint === 'briefs_tally_form_id_key') {
             return res.status(400).json({ error: 'This form is already connected to a brief' });
         }
-        res.status(500).json({ error: 'Failed to create brief' });
+        res.status(500).json({ 
+            error: 'Failed to create brief',
+            details: error.message
+        });
     } finally {
         client.release();
     }
@@ -489,7 +568,10 @@ app.post('/api/admin/brief/:id/import-sheet', authenticateAdmin, async (req, res
         });
     } catch (error) {
         console.error('Error importing from sheet:', error);
-        res.status(500).json({ error: 'Failed to import from Google Sheet' });
+        res.status(500).json({ 
+            error: 'Failed to import from Google Sheet',
+            details: error.message
+        });
     }
 });
 
@@ -506,7 +588,10 @@ app.get('/api/admin/briefs', authenticateAdmin, async (req, res) => {
         res.json({ briefs: result.rows });
     } catch (err) {
         console.error('Error fetching briefs:', err);
-        return res.status(500).json({ error: 'Database error' });
+        return res.status(500).json({ 
+            error: 'Database error',
+            message: 'Failed to fetch briefs'
+        });
     }
 });
 
@@ -514,11 +599,20 @@ app.get('/api/admin/briefs', authenticateAdmin, async (req, res) => {
 app.put('/api/admin/brief/:id/status', authenticateAdmin, async (req, res) => {
     const { status } = req.body;
     
+    if (!['live', 'expired'].includes(status)) {
+        return res.status(400).json({ error: 'Invalid status. Must be "live" or "expired"' });
+    }
+    
     try {
-        await pool.query(
-            'UPDATE briefs SET status = $1 WHERE id = $2',
+        const result = await pool.query(
+            'UPDATE briefs SET status = $1 WHERE id = $2 RETURNING id',
             [status, req.params.id]
         );
+        
+        if (result.rowCount === 0) {
+            return res.status(404).json({ error: 'Brief not found' });
+        }
+        
         res.json({ success: true });
     } catch (err) {
         console.error('Error updating brief status:', err);
@@ -564,7 +658,10 @@ app.get('/api/admin/applications', authenticateAdmin, async (req, res) => {
         res.json({ applications: result.rows });
     } catch (err) {
         console.error('Error fetching applications:', err);
-        return res.status(500).json({ error: 'Database error' });
+        return res.status(500).json({ 
+            error: 'Database error',
+            message: 'Failed to fetch applications'
+        });
     }
 });
 
@@ -572,11 +669,20 @@ app.get('/api/admin/applications', authenticateAdmin, async (req, res) => {
 app.put('/api/admin/application/:id', authenticateAdmin, async (req, res) => {
     const { status, adminFeedback } = req.body;
     
+    if (!['submitted', 'accepted', 'unsuccessful'].includes(status)) {
+        return res.status(400).json({ error: 'Invalid status' });
+    }
+    
     try {
-        await pool.query(
-            'UPDATE applications SET status = $1, admin_feedback = $2 WHERE id = $3',
+        const result = await pool.query(
+            'UPDATE applications SET status = $1, admin_feedback = $2 WHERE id = $3 RETURNING id',
             [status, adminFeedback, req.params.id]
         );
+        
+        if (result.rowCount === 0) {
+            return res.status(404).json({ error: 'Application not found' });
+        }
+        
         res.json({ success: true });
     } catch (err) {
         console.error('Error updating application:', err);
@@ -590,6 +696,10 @@ app.post('/api/admin/applications/bulk-update', authenticateAdmin, async (req, r
     
     if (!applicationIds || applicationIds.length === 0) {
         return res.status(400).json({ error: 'No applications selected' });
+    }
+
+    if (!['submitted', 'accepted', 'unsuccessful'].includes(status)) {
+        return res.status(400).json({ error: 'Invalid status' });
     }
 
     const placeholders = applicationIds.map((_, i) => `$${i + 2}`).join(',');
@@ -612,6 +722,10 @@ app.post('/api/admin/applications/bulk-update', authenticateAdmin, async (req, r
 app.post('/api/user/login', async (req, res) => {
     const { email } = req.body;
     
+    if (!email) {
+        return res.status(400).json({ error: 'Email is required' });
+    }
+    
     try {
         const result = await pool.query(
             'SELECT * FROM applications WHERE email = $1',
@@ -623,7 +737,11 @@ app.post('/api/user/login', async (req, res) => {
         }
         
         const token = jwt.sign({ email }, JWT_SECRET, { expiresIn: '24h' });
-        res.json({ token, email });
+        res.json({ 
+            token, 
+            email,
+            applicationCount: result.rows.length 
+        });
     } catch (err) {
         console.error('User login error:', err);
         return res.status(500).json({ error: 'Database error' });
@@ -632,7 +750,8 @@ app.post('/api/user/login', async (req, res) => {
 
 // Get user's applications
 app.get('/api/user/applications', async (req, res) => {
-    const token = req.headers.authorization?.split(' ')[1];
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.split(' ')[1];
     
     if (!token) {
         return res.status(401).json({ error: 'No token provided' });
@@ -679,24 +798,47 @@ app.get('/api/admin/stats', authenticateAdmin, async (req, res) => {
         res.json(result.rows[0]);
     } catch (err) {
         console.error('Error fetching stats:', err);
-        return res.status(500).json({ error: 'Database error' });
+        return res.status(500).json({ 
+            error: 'Database error',
+            message: 'Failed to fetch statistics'
+        });
     }
 });
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-    res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
+    res.status(200).json({ 
+        status: 'healthy', 
+        timestamp: new Date().toISOString(),
+        database: pool.totalCount > 0 ? 'connected' : 'disconnected'
+    });
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+    console.error('Unhandled error:', err);
+    res.status(500).json({ 
+        error: 'Internal server error',
+        message: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong'
+    });
 });
 
 // 404 handler
 app.use((req, res) => {
-    res.status(404).json({ error: 'Endpoint not found' });
+    console.log('[404] Not found:', req.method, req.path);
+    res.status(404).json({ 
+        error: 'Endpoint not found',
+        path: req.path,
+        method: req.method
+    });
 });
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
+    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`Admin login: admin / admin123`);
+    console.log(`API Base URL: http://localhost:${PORT}/api`);
 });
 
 // Graceful shutdown
@@ -705,7 +847,11 @@ process.on('SIGTERM', shutdown);
 
 async function shutdown() {
     console.log('Shutting down gracefully...');
-    await pool.end();
-    console.log('Database pool closed.');
+    try {
+        await pool.end();
+        console.log('Database pool closed.');
+    } catch (err) {
+        console.error('Error during shutdown:', err);
+    }
     process.exit(0);
 }
