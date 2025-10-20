@@ -212,6 +212,23 @@ function authenticateAdmin(req, res, next) {
 
 // ==================== TEST ENDPOINTS ====================
 
+// Debug endpoint to see raw Tally forms response
+app.get('/api/admin/tally/debug', authenticateAdmin, async (req, res) => {
+    try {
+        const response = await tallyAPI('/forms?limit=50');
+        res.json({
+            total: response.total,
+            page: response.page,
+            limit: response.limit,
+            hasMore: response.hasMore,
+            formCount: response.items ? response.items.length : 0,
+            formNames: response.items ? response.items.map(f => ({ id: f.id, name: f.name })) : []
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Test endpoint
 app.get('/api/test', (req, res) => {
     res.json({ 
@@ -252,19 +269,35 @@ app.post('/api/admin/login', async (req, res) => {
     }
 });
 
-// Get all Tally forms
+// Get all Tally forms - with pagination handling
 app.get('/api/admin/tally/forms', authenticateAdmin, async (req, res) => {
     try {
-        const forms = await tallyAPI('/forms');
+        let allForms = [];
+        let page = 1;
+        let hasMore = true;
+        
+        // Fetch all pages of forms
+        while (hasMore) {
+            console.log(`[Tally Forms] Fetching page ${page}...`);
+            const response = await tallyAPI(`/forms?page=${page}&limit=50`);
+            
+            const forms = response?.items || response?.data || [];
+            allForms = allForms.concat(forms);
+            
+            hasMore = response?.hasMore || false;
+            page++;
+            
+            // Safety limit to prevent infinite loops
+            if (page > 10) break;
+        }
+        
+        console.log(`[Tally Forms] Total forms fetched: ${allForms.length}`);
         
         // Get existing form IDs that are already connected to briefs
         const result = await pool.query('SELECT tally_form_id FROM briefs');
         const connectedFormIds = result.rows.map(b => b.tally_form_id);
         
-        // Tally API returns forms in 'items'
-        const formsList = forms?.items || forms?.data || [];
-        
-        const formsWithStatus = formsList.map(form => ({
+        const formsWithStatus = allForms.map(form => ({
             ...form,
             isConnected: connectedFormIds.includes(form.id)
         }));
