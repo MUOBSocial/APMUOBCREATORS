@@ -181,6 +181,133 @@ async function tallyAPI(endpoint, method = 'GET', data = null) {
     }
 }
 
+// Helper function to detect column types based on content
+function detectColumnType(values) {
+    // Remove empty values and take a sample
+    const sampleValues = values.filter(v => v && v.toString().trim()).slice(0, 10);
+    if (sampleValues.length === 0) return 'unknown';
+    
+    // Email pattern
+    const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const emailMatches = sampleValues.filter(v => emailPattern.test(v.toString().trim()));
+    if (emailMatches.length > sampleValues.length * 0.6) return 'email';
+    
+    // URL patterns (portfolio, website)
+    const urlPattern = /^(https?:\/\/)?([\da-z\.-]+)\.([a-z\.]{2,6})([\/\w \.-]*)*\/?$/i;
+    const urlMatches = sampleValues.filter(v => urlPattern.test(v.toString().trim()));
+    if (urlMatches.length > sampleValues.length * 0.6) return 'url';
+    
+    // Social media patterns
+    const socialPatterns = [
+        /instagram\.com/i,
+        /tiktok\.com/i,
+        /twitter\.com/i,
+        /youtube\.com/i,
+        /@[\w]+/  // Social media handles
+    ];
+    const socialMatches = sampleValues.filter(v => 
+        socialPatterns.some(pattern => pattern.test(v.toString()))
+    );
+    if (socialMatches.length > sampleValues.length * 0.5) return 'social';
+    
+    // Name pattern (mostly alphabetic with possible spaces)
+    const namePattern = /^[a-zA-Z\s\-'\.]+$/;
+    const nameMatches = sampleValues.filter(v => 
+        namePattern.test(v.toString().trim()) && 
+        v.toString().trim().length > 2 &&
+        v.toString().trim().length < 50
+    );
+    if (nameMatches.length > sampleValues.length * 0.7) return 'name';
+    
+    // Date patterns
+    const datePatterns = [
+        /^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}$/,
+        /^\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}$/,
+        /^\w+ \d{1,2}, \d{4}$/
+    ];
+    const dateMatches = sampleValues.filter(v =>
+        datePatterns.some(pattern => pattern.test(v.toString().trim()))
+    );
+    if (dateMatches.length > sampleValues.length * 0.6) return 'date';
+    
+    // Number pattern (follower counts, etc.)
+    const numberPattern = /^[\d,]+$/;
+    const numberMatches = sampleValues.filter(v => numberPattern.test(v.toString().trim()));
+    if (numberMatches.length > sampleValues.length * 0.7) return 'number';
+    
+    // Long text (proposals, descriptions)
+    const avgLength = sampleValues.reduce((sum, v) => sum + v.toString().length, 0) / sampleValues.length;
+    if (avgLength > 100) return 'text_long';
+    if (avgLength > 30) return 'text_medium';
+    
+    return 'text_short';
+}
+
+// Smart column mapping function
+function mapColumns(submissions) {
+    if (!submissions || submissions.length === 0) return {};
+    
+    const firstRows = submissions.slice(0, 10);
+    const columns = Object.keys(firstRows[0]);
+    const columnMapping = {};
+    
+    console.log('[Smart Import] Analyzing columns...');
+    
+    columns.forEach(column => {
+        const values = firstRows.map(row => row[column]);
+        const columnType = detectColumnType(values);
+        const columnLower = column.toLowerCase();
+        
+        console.log(`[Smart Import] Column "${column}" detected as: ${columnType}`);
+        
+        // Map based on detected type and column name hints
+        if (columnType === 'email' || columnLower.includes('email') || columnLower.includes('mail')) {
+            columnMapping.email = column;
+        } else if (columnType === 'social' || 
+                   columnLower.includes('instagram') || 
+                   columnLower.includes('tiktok') || 
+                   columnLower.includes('social')) {
+            columnMapping.social = column;
+        } else if (columnType === 'url' || 
+                   columnLower.includes('portfolio') || 
+                   columnLower.includes('website') || 
+                   columnLower.includes('link')) {
+            columnMapping.portfolio = column;
+        } else if (columnType === 'name' || 
+                   columnLower.includes('name') || 
+                   columnLower === 'full name') {
+            columnMapping.name = column;
+        } else if (columnType === 'date' || 
+                   columnLower.includes('date') || 
+                   columnLower.includes('time')) {
+            columnMapping.date = column;
+        } else if (columnType === 'number' && 
+                   (columnLower.includes('follower') || columnLower.includes('count'))) {
+            columnMapping.followers = column;
+        } else if (columnType === 'text_long' || 
+                   columnLower.includes('proposal') || 
+                   columnLower.includes('description') || 
+                   columnLower.includes('content')) {
+            columnMapping.proposal = column;
+        } else if (columnLower.includes('location') || 
+                   columnLower.includes('country') || 
+                   columnLower.includes('city')) {
+            columnMapping.location = column;
+        } else if (columnLower.includes('engagement') || columnLower.includes('rate')) {
+            columnMapping.engagement = column;
+        } else if (columnLower.includes('style') || columnLower.includes('content type')) {
+            columnMapping.style = column;
+        } else if (columnLower.includes('availability') || columnLower.includes('available')) {
+            columnMapping.availability = column;
+        } else if (columnLower.includes('travel') || columnLower.includes('companion')) {
+            columnMapping.travel = column;
+        }
+    });
+    
+    console.log('[Smart Import] Column mapping:', columnMapping);
+    return columnMapping;
+}
+
 // Helper function to parse Google Sheets CSV
 async function parseGoogleSheetCSV(sheetUrl) {
     try {
@@ -476,53 +603,75 @@ app.post('/api/admin/briefs', authenticateAdmin, async (req, res) => {
                 console.log('[Import] Importing from Google Sheet:', googleSheetUrl);
                 const submissions = await parseGoogleSheetCSV(googleSheetUrl);
                 
-                for (let i = 0; i < submissions.length; i++) {
-                    const submission = submissions[i];
+                if (submissions.length > 0) {
+                    // Smart column detection
+                    const mapping = mapColumns(submissions);
                     
-                    // Map fields based on actual Google Form column names
-                    const email = submission['Email Address'] || submission.Email || submission.email || submission['Email address'] || '';
-                    const instagram = submission['Instagram or TikTok URL'] || submission.Instagram || submission['Instagram Handle'] || submission['Instagram handle'] || '';
-                    const portfolio = submission['Link to Your Media Kit or Portfolio'] || submission.Portfolio || submission['Portfolio Link'] || submission['Portfolio Links'] || '';
-                    
-                    // Additional fields from the form
-                    const fullName = submission['Full Name'] || '';
-                    const followerCount = submission['Follower Count'] || '';
-                    const engagementRate = submission['Average Engagement Rate'] || '';
-                    const contentStyle = submission['Main Content Style'] || '';
-                    const location = submission['Home Country or Current Location'] || '';
-                    const availability = submission['When Are You Available to Stay?'] || '';
-                    const travelCompanion = submission['Would You Be Travelling Solo or With Someone?'] || '';
-                    
-                    // Create a content proposal from multiple fields
-                    const proposal = `Name: ${fullName}\nStyle: ${contentStyle}\nFollowers: ${followerCount}\nEngagement: ${engagementRate}\nLocation: ${location}\nAvailability: ${availability}\nTravel: ${travelCompanion}`;
-                    
-                    if (!email) {
-                        console.log(`[Import] Skipping row ${i + 1}: no email found`);
-                        console.log('[Import] Row data:', Object.keys(submission));
-                        continue;
+                    if (!mapping.email) {
+                        console.log('[Import] Warning: No email column detected');
                     }
                     
-                    try {
-                        await client.query(
-                            `INSERT INTO applications 
-                             (brief_id, tally_submission_id, email, instagram, portfolio, content_proposal, submitted_at, raw_tally_data) 
-                             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                             ON CONFLICT (tally_submission_id) DO NOTHING`,
-                            [
-                                briefId,
-                                submission['Submission ID'] || `${tallyFormId}_row_${i + 1}`,
-                                email,
-                                instagram,
-                                portfolio,
-                                proposal,
-                                submission['Submitted at'] || submission.Timestamp || new Date(),
-                                JSON.stringify(submission)
-                            ]
-                        );
-                        importedCount++;
-                    } catch (insertError) {
-                        console.error(`[Import] Failed to insert row ${i + 1}:`, insertError.message);
+                    for (let i = 0; i < submissions.length; i++) {
+                        const submission = submissions[i];
+                        
+                        // Use smart mapping to extract fields
+                        const email = mapping.email ? submission[mapping.email] : '';
+                        const instagram = mapping.social ? submission[mapping.social] : '';
+                        const portfolio = mapping.portfolio ? submission[mapping.portfolio] : '';
+                        const name = mapping.name ? submission[mapping.name] : '';
+                        const followers = mapping.followers ? submission[mapping.followers] : '';
+                        const engagement = mapping.engagement ? submission[mapping.engagement] : '';
+                        const style = mapping.style ? submission[mapping.style] : '';
+                        const location = mapping.location ? submission[mapping.location] : '';
+                        const availability = mapping.availability ? submission[mapping.availability] : '';
+                        const travel = mapping.travel ? submission[mapping.travel] : '';
+                        
+                        // Build content proposal from available fields
+                        const proposalParts = [];
+                        if (name) proposalParts.push(`Name: ${name}`);
+                        if (style) proposalParts.push(`Style: ${style}`);
+                        if (followers) proposalParts.push(`Followers: ${followers}`);
+                        if (engagement) proposalParts.push(`Engagement: ${engagement}`);
+                        if (location) proposalParts.push(`Location: ${location}`);
+                        if (availability) proposalParts.push(`Availability: ${availability}`);
+                        if (travel) proposalParts.push(`Travel: ${travel}`);
+                        
+                        // If we have a proposal column, add it at the end
+                        if (mapping.proposal && submission[mapping.proposal]) {
+                            proposalParts.push(`\nProposal: ${submission[mapping.proposal]}`);
+                        }
+                        
+                        const proposal = proposalParts.join('\n') || 'No additional information provided';
+                        
+                        if (!email || !email.trim()) {
+                            console.log(`[Import] Skipping row ${i + 1}: no email found`);
+                            continue;
+                        }
+                        
+                        try {
+                            await client.query(
+                                `INSERT INTO applications 
+                                 (brief_id, tally_submission_id, email, instagram, portfolio, content_proposal, submitted_at, raw_tally_data) 
+                                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                                 ON CONFLICT (tally_submission_id) DO NOTHING`,
+                                [
+                                    briefId,
+                                    submission['Submission ID'] || `${tallyFormId}_row_${i + 1}`,
+                                    email.trim(),
+                                    instagram || '',
+                                    portfolio || '',
+                                    proposal,
+                                    mapping.date && submission[mapping.date] ? submission[mapping.date] : new Date(),
+                                    JSON.stringify(submission)
+                                ]
+                            );
+                            importedCount++;
+                        } catch (insertError) {
+                            console.error(`[Import] Failed to insert row ${i + 1}:`, insertError.message);
+                        }
                     }
+                } else {
+                    console.log('[Import] No submissions found in the sheet');
                 }
                 
                 console.log(`[Import] Successfully imported ${importedCount} submissions`);
@@ -576,61 +725,98 @@ app.post('/api/admin/brief/:id/import-sheet', authenticateAdmin, async (req, res
         // Import submissions
         const submissions = await parseGoogleSheetCSV(googleSheetUrl);
         let importedCount = 0;
+        let skippedCount = 0;
         
-        for (let i = 0; i < submissions.length; i++) {
-            const submission = submissions[i];
+        if (submissions.length > 0) {
+            // Smart column detection
+            const mapping = mapColumns(submissions);
             
-            // Map fields based on actual Google Form column names
-            const email = submission['Email Address'] || submission.Email || submission.email || submission['Email address'] || '';
-            const instagram = submission['Instagram or TikTok URL'] || submission.Instagram || submission['Instagram Handle'] || '';
-            const portfolio = submission['Link to Your Media Kit or Portfolio'] || submission.Portfolio || submission['Portfolio Link'] || '';
+            if (!mapping.email) {
+                console.log('[Import] Warning: No email column detected');
+                console.log('[Import] Available columns:', Object.keys(submissions[0]));
+                return res.status(400).json({ 
+                    error: 'No email column detected in the sheet',
+                    availableColumns: Object.keys(submissions[0])
+                });
+            }
             
-            // Additional fields from the form
-            const fullName = submission['Full Name'] || '';
-            const followerCount = submission['Follower Count'] || '';
-            const engagementRate = submission['Average Engagement Rate'] || '';
-            const contentStyle = submission['Main Content Style'] || '';
-            const location = submission['Home Country or Current Location'] || '';
-            const availability = submission['When Are You Available to Stay?'] || '';
-            const travelCompanion = submission['Would You Be Travelling Solo or With Someone?'] || '';
+            console.log(`[Import] Processing ${submissions.length} rows with smart mapping`);
             
-            // Create a content proposal from multiple fields
-            const proposal = `Name: ${fullName}\nStyle: ${contentStyle}\nFollowers: ${followerCount}\nEngagement: ${engagementRate}\nLocation: ${location}\nAvailability: ${availability}\nTravel: ${travelCompanion}`;
-            
-            if (!email) continue;
-            
-            try {
-                await pool.query(
-                    `INSERT INTO applications 
-                     (brief_id, tally_submission_id, email, instagram, portfolio, content_proposal, submitted_at, raw_tally_data) 
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                     ON CONFLICT (tally_submission_id) 
-                     DO UPDATE SET 
-                        email = EXCLUDED.email,
-                        instagram = EXCLUDED.instagram,
-                        portfolio = EXCLUDED.portfolio,
-                        content_proposal = EXCLUDED.content_proposal`,
-                    [
-                        briefId,
-                        submission['Submission ID'] || `${brief.tally_form_id}_row_${i + 1}`,
-                        email,
-                        instagram,
-                        portfolio,
-                        proposal,
-                        submission['Submitted at'] || submission.Timestamp || new Date(),
-                        JSON.stringify(submission)
-                    ]
-                );
-                importedCount++;
-            } catch (insertError) {
-                console.error(`Failed to insert row ${i + 1}:`, insertError.message);
+            for (let i = 0; i < submissions.length; i++) {
+                const submission = submissions[i];
+                
+                // Use smart mapping to extract fields
+                const email = mapping.email ? submission[mapping.email] : '';
+                const instagram = mapping.social ? submission[mapping.social] : '';
+                const portfolio = mapping.portfolio ? submission[mapping.portfolio] : '';
+                const name = mapping.name ? submission[mapping.name] : '';
+                const followers = mapping.followers ? submission[mapping.followers] : '';
+                const engagement = mapping.engagement ? submission[mapping.engagement] : '';
+                const style = mapping.style ? submission[mapping.style] : '';
+                const location = mapping.location ? submission[mapping.location] : '';
+                const availability = mapping.availability ? submission[mapping.availability] : '';
+                const travel = mapping.travel ? submission[mapping.travel] : '';
+                
+                // Build content proposal from available fields
+                const proposalParts = [];
+                if (name) proposalParts.push(`Name: ${name}`);
+                if (style) proposalParts.push(`Style: ${style}`);
+                if (followers) proposalParts.push(`Followers: ${followers}`);
+                if (engagement) proposalParts.push(`Engagement: ${engagement}`);
+                if (location) proposalParts.push(`Location: ${location}`);
+                if (availability) proposalParts.push(`Availability: ${availability}`);
+                if (travel) proposalParts.push(`Travel: ${travel}`);
+                
+                // If we have a proposal column, add it at the end
+                if (mapping.proposal && submission[mapping.proposal]) {
+                    proposalParts.push(`\nProposal: ${submission[mapping.proposal]}`);
+                }
+                
+                const proposal = proposalParts.join('\n') || 'No additional information provided';
+                
+                if (!email || !email.trim()) {
+                    skippedCount++;
+                    continue;
+                }
+                
+                try {
+                    await pool.query(
+                        `INSERT INTO applications 
+                         (brief_id, tally_submission_id, email, instagram, portfolio, content_proposal, submitted_at, raw_tally_data) 
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                         ON CONFLICT (tally_submission_id) 
+                         DO UPDATE SET 
+                            email = EXCLUDED.email,
+                            instagram = EXCLUDED.instagram,
+                            portfolio = EXCLUDED.portfolio,
+                            content_proposal = EXCLUDED.content_proposal`,
+                        [
+                            briefId,
+                            submission['Submission ID'] || `${brief.tally_form_id}_row_${i + 1}`,
+                            email.trim(),
+                            instagram || '',
+                            portfolio || '',
+                            proposal,
+                            mapping.date && submission[mapping.date] ? submission[mapping.date] : new Date(),
+                            JSON.stringify(submission)
+                        ]
+                    );
+                    importedCount++;
+                } catch (insertError) {
+                    console.error(`[Import] Failed to insert row ${i + 1}:`, insertError.message);
+                    skippedCount++;
+                }
             }
         }
+        
+        console.log(`[Import] Import complete: ${importedCount} imported, ${skippedCount} skipped`);
         
         res.json({ 
             success: true, 
             importedCount,
-            totalRows: submissions.length 
+            skippedCount,
+            totalRows: submissions.length,
+            detectedColumns: mapping
         });
     } catch (error) {
         console.error('Error importing from sheet:', error);
