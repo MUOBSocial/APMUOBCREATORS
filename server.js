@@ -500,13 +500,19 @@ app.get('/api/admin/tally/debug', authenticateAdmin, async (req, res) => {
 
 // Admin login
 app.post('/api/admin/login', async (req, res) => {
-    const { username, password } = req.body;
-
-    if (!username || !password) {
-        return res.status(400).json({ error: 'Username and password are required' });
-    }
-
     try {
+        // Check if body exists
+        if (!req.body) {
+            console.error('[Login] No request body received');
+            return res.status(400).json({ error: 'No data received' });
+        }
+
+        const { username, password } = req.body;
+
+        if (!username || !password) {
+            return res.status(400).json({ error: 'Username and password are required' });
+        }
+
         const result = await pool.query('SELECT * FROM admins WHERE username = $1', [username]);
         const admin = result.rows[0];
 
@@ -1055,6 +1061,14 @@ app.get('/api/admin/stats', authenticateAdmin, async (req, res) => {
             message: 'Failed to fetch statistics'
         });
     }
+});
+
+// Keep-alive endpoint
+app.get('/api/keep-alive', (req, res) => {
+    res.json({ 
+        status: 'alive',
+        timestamp: new Date().toISOString()
+    });
 });
 
 // Health check endpoint
